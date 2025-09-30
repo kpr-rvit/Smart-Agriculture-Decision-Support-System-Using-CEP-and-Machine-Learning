@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: siddhi-kafka
+    environment:
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://0.0.0.0:29092,INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:29092,INTERNAL://siddhi-kafka:9092
+      - KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    ports:
+      - "29092:29092"   # Host access for producer/consumer
+    tty: true
+
+  siddhi:
+    image: siddhiio/siddhi-runner-alpine:latest
+    container_name: siddhi-runner
+    volumes:
+      - ./siddhi-apps:/apps
+    command: ["-Dapps=/apps/TempAlertHTTP.siddhi", "-DdisableHTTP=false"]
+    ports:
+      - "8006:8006"    # HTTP endpoint for host
+    depends_on:
+      - kafka
+    tty: true
