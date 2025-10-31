@@ -1,0 +1,5 @@
+#first run the train_crop_model.py to save the trained model
+
+cd C:\sensor-pipeline\backend
+
+python app.py
