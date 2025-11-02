@@ -1,7 +1,9 @@
-@App:name("TempAlertKafka")
-@App:description("Temperature alert system consuming ML forecasts from Kafka")
+@App:name('TempAlertKafka')
+@App:description('Temperature alert system consuming ML forecasts from Kafka with time windows')
 
+--========================
 -- Source: Consume ML forecasts from Kafka
+--========================
 @source(
     type='kafka',
     topic.list='ml-forecast',
@@ -10,20 +12,169 @@
     bootstrap.servers='kafka:9092',
     @map(type='json')
 )
-define stream SensorStream (sensorId string, temperature double);
+define stream SensorStream (
+    sensorId string,
+    temperature_2m double,
+    relative_humidity_2m double,
+    wind_speed_10m double,
+    soil_temperature_0_to_7cm double
+);
 
--- Sink: Log alerts
+--========================
+-- Sinks: Publish to Kafka for backend consumption
+--========================
 @sink(
-    type='log',
-    prefix='🚨 TEMPERATURE ALERT'
+    type='kafka',
+    topic='siddhi-alerts',
+    bootstrap.servers='kafka:9092',
+    @map(type='json')
 )
-define stream AlertStream (sensorId string, temperature double, message string);
+define stream AllAlertsStream(
+    alert_type string,
+    sensorId string,
+    parameter string,
+    value string,
+    condition string,
+    severity string,
+    message string,
+    action string,
+    timestamp long
+);
 
--- Query: Filter temperatures above 15°C and generate alerts
-@info(name='tempAlertQuery')
-from SensorStream[temperature > 15]
+-- Also log to console for debugging
+@sink(type='log', prefix='🚨 SIDDHI_ALERT')
+define stream LogStream(alert_type string, message string, action string);
+
+--========================
+-- Threshold Alerts with 5-minute time window
+--========================
+@info(name='temperatureThreshold')
+from SensorStream[temperature_2m < 20 or temperature_2m > 35]#window.time(5 min)
 select 
-    sensorId, 
-    temperature,
-    str:concat('Temperature ', cast(temperature, 'string'), '°C exceeds threshold of 15°C') as message
-insert into AlertStream;
+    'Temperature Alert' as alert_type,
+    sensorId,
+    'Temperature' as parameter,
+    cast(temperature_2m, 'string') as value,
+    ifThenElse(temperature_2m < 20, '< 20°C', '> 35°C') as condition,
+    ifThenElse(temperature_2m < 20, 'Warning', 'Critical') as severity,
+    ifThenElse(temperature_2m < 20, 
+        str:concat('Low temperature: ', cast(temperature_2m, 'string'), '°C'),
+        str:concat('High temperature: ', cast(temperature_2m, 'string'), '°C')) as message,
+    ifThenElse(temperature_2m < 20,
+        'Activate frost protection, use row covers',
+        'Activate irrigation, provide shade nets') as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+-- Also log
+from AllAlertsStream
+select alert_type, message, action
+insert into LogStream;
+
+@info(name='humidityThreshold')
+from SensorStream[relative_humidity_2m < 70]#window.time(5 min)
+select 
+    'Humidity Alert' as alert_type,
+    sensorId,
+    'Humidity' as parameter,
+    str:concat(cast(relative_humidity_2m, 'string'), '%') as value,
+    '< 70%' as condition,
+    'Warning' as severity,
+    str:concat('Low humidity detected: ', cast(relative_humidity_2m, 'string'), '%') as message,
+    'Increase irrigation frequency, use mulching' as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+@info(name='windThreshold')
+from SensorStream[wind_speed_10m < 2 or wind_speed_10m > 7]#window.time(5 min)
+select 
+    'Wind Alert' as alert_type,
+    sensorId,
+    'Wind Speed' as parameter,
+    str:concat(cast(wind_speed_10m, 'string'), ' km/h') as value,
+    ifThenElse(wind_speed_10m < 2, '< 2 km/h', '> 7 km/h') as condition,
+    'Warning' as severity,
+    ifThenElse(wind_speed_10m < 2,
+        str:concat('Low wind speed: ', cast(wind_speed_10m, 'string'), ' km/h'),
+        str:concat('High wind speed: ', cast(wind_speed_10m, 'string'), ' km/h')) as message,
+    ifThenElse(wind_speed_10m < 2,
+        'Poor air circulation - monitor for fungal diseases',
+        'High wind alert - secure structures, delay spraying') as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+@info(name='soilTempThreshold')
+from SensorStream[soil_temperature_0_to_7cm < 20 or soil_temperature_0_to_7cm > 30]#window.time(5 min)
+select 
+    'Soil Temperature Alert' as alert_type,
+    sensorId,
+    'Soil Temperature' as parameter,
+    str:concat(cast(soil_temperature_0_to_7cm, 'string'), '°C') as value,
+    ifThenElse(soil_temperature_0_to_7cm < 20, '< 20°C', '> 30°C') as condition,
+    'Warning' as severity,
+    ifThenElse(soil_temperature_0_to_7cm < 20,
+        str:concat('Low soil temperature: ', cast(soil_temperature_0_to_7cm, 'string'), '°C'),
+        str:concat('High soil temperature: ', cast(soil_temperature_0_to_7cm, 'string'), '°C')) as message,
+    ifThenElse(soil_temperature_0_to_7cm < 20,
+        'Delay planting, use black plastic mulch to warm soil',
+        'Increase irrigation, use organic mulch to cool soil') as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+--========================
+-- Composite Alert: Temperature + Humidity with window
+--========================
+@info(name='tempHumidityComposite')
+from SensorStream[temperature_2m < 20 and relative_humidity_2m < 70]#window.time(5 min)
+select 
+    'Composite Alert' as alert_type,
+    sensorId,
+    'Temperature + Humidity' as parameter,
+    str:concat(cast(temperature_2m, 'string'), '°C, ', cast(relative_humidity_2m, 'string'), '%') as value,
+    'Low Temp + Low Humidity' as condition,
+    'Critical' as severity,
+    str:concat('Critical: Low temperature (', cast(temperature_2m, 'string'), 
+               '°C) AND low humidity (', cast(relative_humidity_2m, 'string'), '%)') as message,
+    'URGENT: High stress conditions - activate micro-sprinklers for humidity, protect from frost' as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+--========================
+-- Sequence / Sustained patterns
+--========================
+@info(name='sustainedLowTemp')
+from every e1=SensorStream[temperature_2m < 20] -> 
+     e2=SensorStream[temperature_2m < 20] -> 
+     e3=SensorStream[temperature_2m < 20]
+select 
+    'Sustained Temperature Alert' as alert_type,
+    e1.sensorId as sensorId,
+    'Temperature Trend' as parameter,
+    str:concat(cast(e1.temperature_2m, 'string'), '°C → ', 
+               cast(e2.temperature_2m, 'string'), '°C → ', 
+               cast(e3.temperature_2m, 'string'), '°C') as value,
+    '3 Consecutive Low Readings' as condition,
+    'Critical' as severity,
+    str:concat('Sustained low temperature: ', cast(e1.temperature_2m, 'string'), '°C → ',
+               cast(e2.temperature_2m, 'string'), '°C → ', cast(e3.temperature_2m, 'string'), '°C') as message,
+    'CRITICAL: 3 consecutive low readings - immediate frost protection required' as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
+
+@info(name='lowTempOrSoilLowHumidity')
+from every e1=SensorStream[(temperature_2m < 20 or soil_temperature_0_to_7cm < 20) and relative_humidity_2m < 70]
+select 
+    'Multi-Factor Stress Alert' as alert_type,
+    e1.sensorId as sensorId,
+    'Multiple Parameters' as parameter,
+    str:concat('Temp=', cast(e1.temperature_2m, 'string'), '°C, Soil=', 
+               cast(e1.soil_temperature_0_to_7cm, 'string'), '°C, Hum=', 
+               cast(e1.relative_humidity_2m, 'string'), '%') as value,
+    'Cold + Dry Conditions' as condition,
+    'Critical' as severity,
+    str:concat('Multi-factor stress: Temp=', cast(e1.temperature_2m, 'string'), 
+               '°C, Soil=', cast(e1.soil_temperature_0_to_7cm, 'string'), 
+               '°C, Humidity=', cast(e1.relative_humidity_2m, 'string'), '%') as message,
+    'Combined stress detected - prioritize warming and humidification measures' as action,
+    eventTimestamp() as timestamp
+insert into AllAlertsStream;
